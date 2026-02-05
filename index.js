@@ -226,7 +226,8 @@ function checkHeartbeatStaleness() {
   try {
     if (fs.existsSync(CONFIG.heartbeatStatePath)) {
       const data = JSON.parse(fs.readFileSync(CONFIG.heartbeatStatePath, 'utf8'));
-      const lastHeartbeat = data.lastHeartbeat || 0;
+      // lastHeartbeat is stored in seconds (Unix timestamp), convert to ms
+      const lastHeartbeat = (data.lastHeartbeat || 0) * 1000;
       const ageMinutes = (now - lastHeartbeat) / (1000 * 60);
       
       if (ageMinutes > CONFIG.thresholds.heartbeatStaleMin) {
