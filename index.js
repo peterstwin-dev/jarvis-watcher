@@ -18,7 +18,16 @@ const CONFIG = {
   intervals: {
     gatewayPing: 60 * 1000,      // 60 seconds
     resourceCheck: 5 * 60 * 1000, // 5 minutes
-    heartbeatCheck: 10 * 60 * 1000 // 10 minutes
+    heartbeatCheck: 10 * 60 * 1000, // 10 minutes
+    voiceAppCheck: 2 * 60 * 1000  // 2 minutes
+  },
+  voiceApp: {
+    port: 3001,
+    url: 'http://localhost:3001/',
+    appDir: '/Users/petercalfee/workspace/openclaw-mobile/app',
+    lockFile: '/Users/petercalfee/workspace/openclaw-mobile/app/.next/dev/lock',
+    tmuxSession: 'voice-app',
+    healthScriptPath: path.join(os.homedir(), '.openclaw/workspace/scripts/voice-app-health.sh')
   },
   cooldowns: {
     wakeEvent: 5 * 60 * 1000,    // 5 minutes
@@ -43,7 +52,8 @@ const STATE = {
     gateway: { status: 'unknown', lastCheck: null, failures: 0 },
     files: { status: 'watching', watchedFiles: [] },
     resources: { status: 'unknown', lastCheck: null, memory: null, disk: null },
-    heartbeat: { status: 'unknown', lastCheck: null, stale: false }
+    heartbeat: { status: 'unknown', lastCheck: null, stale: false },
+    voiceApp: { status: 'unknown', lastCheck: null, recoveryAttempts: 0 }
   }
 };
 
@@ -258,6 +268,50 @@ function checkHeartbeatStaleness() {
   }
 }
 
+// Voice app health monitoring with auto-recovery
+function checkVoiceAppHealth() {
+  const now = Date.now();
+  const { url, lockFile, appDir, tmuxSession } = CONFIG.voiceApp;
+  
+  // HTTP health check
+  const req = http.request(url, { timeout: 5000 }, (res) => {
+    if (res.statusCode === 200) {
+      // App is healthy
+      if (STATE.monitors.voiceApp.status === 'down') {
+        log('voiceapp', 'Voice app recovered');
+        sendWakeEvent('voiceapp-recovery', 'Voice app has recovered and is responding normally');
+      }
+      STATE.monitors.voiceApp = {
+        status: 'healthy',
+        lastCheck: now,
+        recoveryAttempts: 0
+      };
+    }
+  });
+  
+  req.on('error', () => {
+    log('voiceapp', 'Voice app not responding - attempting auto-recovery');
+    STATE.monitors.voiceApp.status = 'down';
+    STATE.monitors.voiceApp.lastCheck = now;
+    STATE.monitors.voiceApp.recoveryAttempts++;
+    
+    // Run the health script in fix mode
+    exec(`${CONFIG.voiceApp.healthScriptPath} fix`, (err, stdout, stderr) => {
+      if (err) {
+        log('voiceapp', `Recovery failed: ${err.message}`);
+        // Only alert after 3 failed recovery attempts (6 minutes total)
+        if (STATE.monitors.voiceApp.recoveryAttempts >= 3) {
+          sendWakeEvent('voiceapp-down', `Voice app is down and auto-recovery failed after ${STATE.monitors.voiceApp.recoveryAttempts} attempts. Manual intervention may be needed.`);
+        }
+      } else {
+        log('voiceapp', `Recovery script output: ${stdout.trim()}`);
+      }
+    });
+  });
+  
+  req.end();
+}
+
 // HTTP status server
 function createStatusServer() {
   const server = http.createServer((req, res) => {
@@ -341,11 +395,13 @@ function main() {
   setInterval(checkGatewayHealth, CONFIG.intervals.gatewayPing);
   setInterval(checkSystemResources, CONFIG.intervals.resourceCheck);
   setInterval(checkHeartbeatStaleness, CONFIG.intervals.heartbeatCheck);
+  setInterval(checkVoiceAppHealth, CONFIG.intervals.voiceAppCheck);
   
   // Run initial checks
   checkGatewayHealth();
   checkSystemResources();
   checkHeartbeatStaleness();
+  checkVoiceAppHealth();
   
   // Setup graceful shutdown
   process.on('SIGTERM', () => shutdown(server));
